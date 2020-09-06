@@ -12,7 +12,7 @@ These scripts require `sensors.conf` to have a few basic entries for mqtt server
 Script: `get_awair.py`. An [Awair Developer account (free)](https://developer.getawair.com/onboard/welcome) is required for an access token which is stored in `sensors.conf`. The following entry is required:
 
     [AWAIR]
-    auth_token_api: <auth token, do nott include "Bearer ">
+    auth_token_api: <auth token, do not include "Bearer ">
 
 Optionally, you can add a `location` entry in the `[AWAIR]` section of `sensors.conf` if you have multiple locations under your account and want to filter down all units at a single location. This location name is `locationName` from the [Devices endpoint](https://docs.developer.getawair.com/#26ca616d-b6e6-4647-a07d-5c90a23b7afe). Otherwise, devices from all locations will be used.
 
