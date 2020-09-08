@@ -1,11 +1,13 @@
 #!/usr/bin/python3
 
 import configparser
+import argparse
 import fcntl
 import sys
 import http.client
 import json
 import aqi
+import time
 import sqlite3
 import paho.mqtt.publish as publish
 
@@ -56,6 +58,7 @@ def get_station_data(station_id):
 
         stats_dict = json.loads(result['Stats'])
         stats_dict['station'] = result['ID']
+        stats_dict['last_updated'] = result['LastSeen']
         summary['station_dicts'].append(stats_dict)
 
     # Loop through the keys we want to average,
@@ -164,11 +167,33 @@ def main():
     mqtt_host = config.get('ALL', 'mqtt_host')
     db_host = config.get('ALL', 'db_file')
 
-    # Get the station_id from argv
-    if len(sys.argv) >= 2:
-        station_id = sys.argv[1]
+    parser = argparse.ArgumentParser(description='Get AQI data from PurpleAir')
+    parser.add_argument('station_ids', nargs='+', type=int)
+    parser.add_argument('--nosave', action='store_const',
+                        const=True, default=False)
+    parser.add_argument('--nomqtt', action='store_const',
+                        const=True, default=False)
+    args = parser.parse_args()
+
+    time_now = int(time.time())
+    stations = []
+
+    for station_id in args.station_ids:
         station_data = get_station_data(station_id)
+
+        # Store time delta as first elem in tuple for sorting
+        time_since_update = time_now \
+            - station_data['station_dicts'][0]['last_updated']
+        stations.append((time_since_update, station_data))
+
+    # Sort and take the first set of data (remove first element in result
+    stations.sort(key=lambda x: x[0])
+    station_data = stations[0][1]
+
+    if not args.nosave:
         save_data_to_db(db_host, station_data)
+
+    if not args.nomqtt:
         aqi_description = get_aqi_description(station_data['aqi']['v1'])
         publish_to_mqtt(mqtt_host,
                         '{"st_aqi": ' + str(station_data['aqi']['v1']) + ', '
@@ -179,8 +204,6 @@ def main():
         publish_to_mqtt(mqtt_host,
                         '{"st_aqi": ' + str(last_hour_aqi_diff) + '}',
                         'last_hour')
-    else:
-        print('usage: get_aqi.py <station_id>')
 
 
 # This is the standard boilerplate that calls the main() function.
