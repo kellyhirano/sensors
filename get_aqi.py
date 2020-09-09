@@ -173,10 +173,13 @@ def main():
                         const=True, default=False)
     parser.add_argument('--nomqtt', action='store_const',
                         const=True, default=False)
+    parser.add_argument('--verbose', action='store_const',
+                        const=True, default=False)
     args = parser.parse_args()
 
     time_now = int(time.time())
     stations = []
+    station_data = {}
 
     for station_id in args.station_ids:
         station_data = get_station_data(station_id)
@@ -185,10 +188,21 @@ def main():
         time_since_update = time_now \
             - station_data['station_dicts'][0]['last_updated']
         stations.append((time_since_update, station_data))
+        if args.verbose:
+            print("Station ID: {}".format(station_id))
+            print("Time since update: {}".format(time_since_update))
 
-    # Sort and take the first set of data (remove first element in result
-    stations.sort(key=lambda x: x[0])
+    # Bias to the first station unless it hasn't been upadted in the last 5m.
+    # If the first station is stale, sort by time_since_update, then take
+    # the first item. This prevents bouncing back and forth between stations.
+    if stations[0][0] >= 300:
+        stations.sort(key=lambda x: x[0])
+
     station_data = stations[0][1]
+
+    if args.verbose:
+        print("Selected data:")
+        print(station_data)
 
     if not args.nosave:
         save_data_to_db(db_host, station_data)
