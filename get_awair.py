@@ -1,11 +1,11 @@
 #!/usr/bin/python3
 
 import configparser
+import argparse
 import fcntl
 import sys
 import http.client
 import json
-import pprint
 import aqi
 import sqlite3
 import paho.mqtt.publish as publish
@@ -51,9 +51,6 @@ class AwairAPI():
         """Get list of devices, filtered by __location"""
 
         devices = self.__uri_to_dict('/v1/users/self/devices')
-        if self.__location is not None:
-            devices['devices'] = [loc for loc in devices['devices']
-                                  if loc['locationName'] == self.__location]
 
         return devices
 
@@ -64,8 +61,11 @@ class AwairAPI():
         self.__device_data = []
         for device in self.devices['devices']:
             this_data = self.__get_device_data(device['deviceType'],
-                                               device['deviceId'],
-                                               device['name'])
+                                               device['deviceId'])
+            this_data['location'] = device['name']
+            this_data['physical_location'] = device['locationName']
+            this_data['uuid'] = "{}_{}".format(device['deviceType'],
+                                               device['deviceId'])
             self.__device_data.append(this_data)
 
     @property
@@ -79,14 +79,13 @@ class AwairAPI():
                '{}/{}/air-data/latest?fahrenheit=true'.format(device_type,
                                                               device_id))
 
-    def __get_device_data(self, device_type, device_id, device_name):
+    def __get_device_data(self, device_type, device_id):
         """Receive AirData API data, do conversions to standard format"""
 
         device_uri = self.__create_air_data_uri(device_type, device_id)
         device_data = self.__uri_to_dict(device_uri)
 
         sensor_data = {}
-        sensor_data['location'] = device_name
         sensor_data['datetime'] = device_data['data'][0]['timestamp']
 
         # Convert list of dicts to dict indexed by comp
@@ -117,15 +116,17 @@ def save_data_to_db(db_file, storage_data):
     # Collect the data of tuples into an array
     data_to_db = []
     for sensor in storage_data:
-        data_to_db.append((sensor['datetime'], sensor['location'],
+        data_to_db.append((sensor['datetime'], sensor['uuid'],
+                           sensor['location'], sensor['physical_location'],
                            sensor['temp'], sensor['co2'], sensor['humid'],
                            sensor['voc'], sensor['dust']))
 
     # Execute these statements en masse against the list
     statement = """replace
                    into awair
-                   (datetime, location, temp, co2, humid, voc, dust)
-                   values (?, ?, ?, ?, ?, ?, ?)"""
+                   (datetime, uuid, location, physical_location,
+                   temp, co2, humid, voc, dust)
+                   values (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
     cur.executemany(statement, data_to_db)
 
     # Don't forget to commit!
@@ -149,7 +150,7 @@ def add_last_hour_data(db_file, storage_data):
     # Note not localtime for strftime 'now' since Awair stores things in UTC
     statement = """select *
                    from awair
-                   where location = ?
+                   where uuid = ?
                    and strftime('%s', 'now')
                        - strftime('%s', datetime) > ( 60*60 )
                    order by datetime desc limit 1"""
@@ -158,14 +159,13 @@ def add_last_hour_data(db_file, storage_data):
     for sensor in storage_data:
 
         # Second element must be a list!
-        cur.execute(statement, (sensor['location'],))
+        cur.execute(statement, (sensor['uuid'],))
         row = cur.fetchone()
 
         # Make sure there's a previous entry.
         # This should only come into play for new devices
-        # TODO type(row) is returning a sql row type, not dict
-        # if type(row) is not dict:
-        #     continue
+        if row is None:
+            continue
 
         # Slightly dangerous as the keys for the sensor
         # need to mirror that of the rows in the DB
@@ -175,7 +175,8 @@ def add_last_hour_data(db_file, storage_data):
             last_hour_key = 'last_hour_' + key
 
             # Skip these
-            if key == 'datetime' or key == 'location' or row[key] == '':
+            if key == 'datetime' or key == 'location' or key == 'uuid' \
+               or key == 'physical_location' or row[key] == '':
                 continue
 
             # One-decimal floats
@@ -193,8 +194,6 @@ def add_last_hour_data(db_file, storage_data):
 def add_last_hour_dust(db_file, storage_data):
     """Add last hour dust separately; diff func needed because of AQI calc"""
 
-    avg_aqi = {}
-
     # Connect to the db
     con = sqlite3.connect(db_file)
 
@@ -205,12 +204,12 @@ def add_last_hour_dust(db_file, storage_data):
 
     # Note not localtime for strftime 'now' since Awair stores things in UTC
     statement = """select
-                   location, avg(dust)
+                   uuid, avg(dust)
                    from awair
                    where strftime('%s', 'now') - strftime('%s', datetime)
                          < ( 60*60 )
                    and dust != ''
-                   group by location"""
+                   group by uuid"""
 
     # Second element must be a list!
     cur.execute(statement)
@@ -218,28 +217,39 @@ def add_last_hour_dust(db_file, storage_data):
     con.close()
 
     # Store the aqi
+    avg_aqi = {}
     for row in rows:
-        avg_aqi[row['location']] = int(aqi.to_iaqi(aqi.POLLUTANT_PM25,
-                                                   row['avg(dust)'],
-                                                   algo=aqi.ALGO_EPA))
+        avg_aqi[row['uuid']] = int(aqi.to_iaqi(aqi.POLLUTANT_PM25,
+                                               row['avg(dust)'],
+                                               algo=aqi.ALGO_EPA))
 
     # Add AQI to storage_data
     for sensor in storage_data:
-        if sensor['location'] in avg_aqi:
-            sensor['aqi'] = avg_aqi[sensor['location']]
+        if sensor['uuid'] in avg_aqi:
+            sensor['aqi'] = avg_aqi[sensor['uuid']]
 
 
-def publish_to_mqtt(mqtt_host, data, channel):
+def publish_to_mqtt(mqtt_host, location, data, channel):
     """Publish data to MQTT server"""
 
     for sensor in data:
         payload = json.dumps(sensor)
 
         print(">>>>> mqtt")
-        print(payload)
 
-        publish.single('awair/' + sensor['location'] + '/' + channel,
-                       payload, hostname=mqtt_host, retain=True)
+        if (location and location != sensor['physical_location']) \
+           or not location:
+            publish.single('awair/' + sensor['physical_location'] + '/'
+                           + sensor['location'] + '/' + channel,
+                           payload, hostname=mqtt_host, retain=True)
+            print(sensor['physical_location'] + '/' + sensor['location'])
+
+        else:
+            publish.single('awair/' + sensor['location'] + '/' + channel,
+                           payload, hostname=mqtt_host, retain=True)
+            print(sensor['location'])
+
+        print(payload)
 
 
 def main():
@@ -252,16 +262,25 @@ def main():
     auth_token = config.get('AWAIR', 'auth_token_api')
     location = config.get('AWAIR', 'location')
 
+    parser = argparse.ArgumentParser(description='Get data from Awair device')
+    parser.add_argument('--nosave', action='store_const',
+                        const=True, default=False)
+    parser.add_argument('--nomqtt', action='store_const',
+                        const=True, default=False)
+    args = parser.parse_args()
+
     awair_api = AwairAPI(auth_token, location)
-
-    pp = pprint.PrettyPrinter()
-
     awair_api.update_device_data()
     storage_data = awair_api.device_data
+
     add_last_hour_dust(db_file, storage_data)
     add_last_hour_data(db_file, storage_data)
-    save_data_to_db(db_file, storage_data)
-    publish_to_mqtt(mqtt_host, storage_data, 'sensor')
+
+    if not args.nosave:
+        save_data_to_db(db_file, storage_data)
+
+    if not args.nomqtt:
+        publish_to_mqtt(mqtt_host, location, storage_data, 'sensor')
 
 
 # This is the standard boilerplate that calls the main() function.
