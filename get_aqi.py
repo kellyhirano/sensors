@@ -48,6 +48,8 @@ def get_station_data(station_id):
     summary['total'] = {}
     summary['average'] = {}
     summary['aqi'] = {}
+    summary['lrapa_average'] = {}
+    summary['lrapa_aqi'] = {}
 
     # The endpoint returns all station data; find what we're looking for
     for result in purple_air_data['results']:
@@ -84,6 +86,12 @@ def get_station_data(station_id):
                                               summary['average'][key],
                                               algo=aqi.ALGO_EPA))
 
+        summary['lrapa_average'][key] = .5 * summary['average'][key] - .66
+        summary['lrapa_aqi'][key] = \
+            int(aqi.to_iaqi(aqi.POLLUTANT_PM25,
+                            summary['lrapa_average'][key],
+                            algo=aqi.ALGO_EPA))
+
     return summary
 
 
@@ -119,12 +127,14 @@ def save_data_to_db(db_host, station_data):
     # Collect the data of tuples into an array
     data_to_db = []
     for key in station_data['aqi']:
-        data_to_db.append((key, station_data['aqi'][key]))
+        data_to_db.append((key, station_data['aqi'][key],
+                           station_data['lrapa_aqi'][key],
+                           station_data['average'][key]))
 
     # Execute these statements en masse against the list
     statement = """insert into purple_air
-                   (datetime, id, aqi)
-                   values (datetime('now','localtime'), ?, ?)"""
+                   (datetime, id, aqi, lrapa_aqi, pm25)
+                   values (datetime('now','localtime'), ?, ?, ?, ?)"""
     cur.executemany(statement, data_to_db)
 
     # Don't forget to commit!
@@ -210,8 +220,14 @@ def main():
     if not args.nomqtt:
         aqi_description = get_aqi_description(station_data['aqi']['v1'])
         publish_to_mqtt(mqtt_host,
-                        '{"st_aqi": ' + str(station_data['aqi']['v1']) + ', '
-                        + '"st_aqi_desc": "' + aqi_description + '"}',
+                        '{"st_aqi": ' + str(station_data['aqi']['v1'])
+                        + ', ' + '"st_aqi_desc": "' + aqi_description + '"}',
+                        'sensor')
+
+        aqi_description = get_aqi_description(station_data['lrapa_aqi']['v1'])
+        publish_to_mqtt(mqtt_host,
+                        '{"st_aqi": ' + str(station_data['lrapa_aqi']['v1'])
+                        + ', ' + '"st_aqi_desc": "' + aqi_description + '"}',
                         'sensor')
 
         last_hour_aqi_diff = get_last_hour_aqi_diff(db_host, station_data)
