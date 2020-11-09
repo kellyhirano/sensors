@@ -86,7 +86,11 @@ def get_station_data(station_id):
                                               summary['average'][key],
                                               algo=aqi.ALGO_EPA))
 
+        # Make sure this conversion doesn't go negative
         summary['lrapa_average'][key] = .5 * summary['average'][key] - .66
+        if summary['lrapa_average'][key] < 0:
+            summary['lrapa_average'][key] = 0
+
         summary['lrapa_aqi'][key] = \
             int(aqi.to_iaqi(aqi.POLLUTANT_PM25,
                             summary['lrapa_average'][key],
@@ -148,7 +152,7 @@ def get_last_hour_aqi_diff(db_host, station_data):
     con = sqlite3.connect(db_host)
     cur = con.cursor()
 
-    statement = """select aqi
+    statement = """select aqi, lrapa_aqi
                    from purple_air
                    where id = 'v1'
                    and strftime('%s', 'now', 'localtime')
@@ -160,7 +164,8 @@ def get_last_hour_aqi_diff(db_host, station_data):
 
     con.close()
 
-    return station_data['aqi']['v1'] - rows[0][0]
+    return station_data['aqi']['v1'] - rows[0][0], \
+           station_data['lrapa_aqi']['v1'] - rows[0][1]
 
 
 def publish_to_mqtt(mqtt_host, payload, channel):
@@ -218,21 +223,32 @@ def main():
         save_data_to_db(db_host, station_data)
 
     if not args.nomqtt:
-        aqi_description = get_aqi_description(station_data['aqi']['v1'])
+        aqi_desc = get_aqi_description(station_data['aqi']['v1'])
+        aqi_lrapa_desc = get_aqi_description(station_data['lrapa_aqi']['v1'])
+        last_hour_aqi_diff, last_hour_lrapa_aqi_diff \
+            = get_last_hour_aqi_diff(db_host, station_data)
+
+        to_publish = {'st_aqi': station_data['aqi']['v1'],
+                      'st_aqi_desc': aqi_desc,
+                      'st_lrapa_aqi': station_data['lrapa_aqi']['v1'],
+                      'st_lrapa_aqi_desc': aqi_lrapa_desc,
+                      'st_aqi_last_hour': last_hour_aqi_diff,
+                      'st_lrapa_aqi_last_hour': last_hour_lrapa_aqi_diff}
+
         publish_to_mqtt(mqtt_host,
-                        '{"st_aqi": ' + str(station_data['aqi']['v1'])
-                        + ', ' + '"st_aqi_desc": "' + aqi_description + '"}',
+                        json.dumps(to_publish),
+                        # '{"st_aqi": ' + str(station_data['aqi']['v1'])
+                        # + ', "st_aqi_desc": "' + aqi_desc
+                        # + '", "st_lrapa_aqi": '
+                        # + str(station_data['lrapa_aqi']['v1'])
+                        # + ', "st_lrapa_aqi_desc": "' + aqi_lrapa_desc
+                        # + '"}',
                         'sensor')
 
-        aqi_description = get_aqi_description(station_data['lrapa_aqi']['v1'])
         publish_to_mqtt(mqtt_host,
-                        '{"st_aqi": ' + str(station_data['lrapa_aqi']['v1'])
-                        + ', ' + '"st_aqi_desc": "' + aqi_description + '"}',
-                        'sensor')
-
-        last_hour_aqi_diff = get_last_hour_aqi_diff(db_host, station_data)
-        publish_to_mqtt(mqtt_host,
-                        '{"st_aqi": ' + str(last_hour_aqi_diff) + '}',
+                        '{"st_aqi": ' + str(last_hour_aqi_diff)
+                        + ', "st_lrapa_aqi": ' + str(last_hour_lrapa_aqi_diff)
+                        + '}',
                         'last_hour')
 
 
