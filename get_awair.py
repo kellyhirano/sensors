@@ -62,6 +62,11 @@ class AwairAPI():
         for device in self.devices['devices']:
             this_data = self.__get_device_data(device['deviceType'],
                                                device['deviceId'])
+
+            # Don't add empty data sets
+            if not this_data:
+                continue
+
             this_data['location'] = device['name']
             this_data['physical_location'] = device['locationName']
             this_data['uuid'] = "{}_{}".format(device['deviceType'],
@@ -86,6 +91,11 @@ class AwairAPI():
         device_data = self.__uri_to_dict(device_uri)
 
         sensor_data = {}
+
+        # Return empty dict if no data returned
+        if len(device_data['data']) == 0:
+            return sensor_data
+
         sensor_data['datetime'] = device_data['data'][0]['timestamp']
 
         # Convert list of dicts to dict indexed by comp
@@ -170,6 +180,10 @@ def add_last_hour_data(db_file, storage_data):
         # Slightly dangerous as the keys for the sensor
         # need to mirror that of the rows in the DB
         for key in row.keys():
+
+            # Account for not having returned data from the device api
+            if key not in sensor:
+                continue
 
             # Set last hour key
             last_hour_key = 'last_hour_' + key
