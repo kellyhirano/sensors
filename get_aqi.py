@@ -164,8 +164,15 @@ def get_last_hour_aqi_diff(db_host, station_data):
 
     con.close()
 
-    return station_data['aqi']['v1'] - rows[0][0], \
-           station_data['lrapa_aqi']['v1'] - rows[0][1]
+    aqi_hour_ago = station_data['aqi']['v1']
+    lrapa_aqi_hour_ago = station_data['lrapa_aqi']['v1']
+
+    if (len(rows) > 0):
+      aqi_hour_ago = rows[0][0]
+      lrapa_aqi_hour_ago = rows[0][1]
+
+    return station_data['aqi']['v1'] - aqi_hour_ago, \
+           station_data['lrapa_aqi']['v1'] - lrapa_aqi_hour_ago
 
 
 def publish_to_mqtt(mqtt_host, payload, channel):
@@ -237,12 +244,6 @@ def main():
 
         publish_to_mqtt(mqtt_host,
                         json.dumps(to_publish),
-                        # '{"st_aqi": ' + str(station_data['aqi']['v1'])
-                        # + ', "st_aqi_desc": "' + aqi_desc
-                        # + '", "st_lrapa_aqi": '
-                        # + str(station_data['lrapa_aqi']['v1'])
-                        # + ', "st_lrapa_aqi_desc": "' + aqi_lrapa_desc
-                        # + '"}',
                         'sensor')
 
         publish_to_mqtt(mqtt_host,
