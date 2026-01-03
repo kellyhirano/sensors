@@ -249,19 +249,22 @@ def publish_to_mqtt(mqtt_host, location, data, channel):
     for sensor in data:
         payload = json.dumps(sensor)
 
+        # Normalize curly apostrophes to straight apostrophes for MQTT topics
+        sensor_location = sensor['location'].replace('\u2019', "'")
+
         print(">>>>> mqtt")
 
         if (location and location != sensor['physical_location']) \
            or not location:
             publish.single('awair/' + sensor['physical_location'] + '/'
-                           + sensor['location'] + '/' + channel,
+                           + sensor_location + '/' + channel,
                            payload, hostname=mqtt_host, retain=True)
-            print(sensor['physical_location'] + '/' + sensor['location'])
+            print(sensor['physical_location'] + '/' + sensor_location)
 
         else:
-            publish.single('awair/' + sensor['location'] + '/' + channel,
+            publish.single('awair/' + sensor_location + '/' + channel,
                            payload, hostname=mqtt_host, retain=True)
-            print(sensor['location'])
+            print(sensor_location)
 
         print(payload)
 
