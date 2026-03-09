@@ -300,6 +300,10 @@ def main():
     while True:
 
       ## Make the connection and get the XML response
+      response = None
+      xml_response = None
+      connection = None
+
       try:
         logging.info("Start while loop")
 
@@ -316,12 +320,18 @@ def main():
         logging.info('Response: ' + xml_response.decode('UTF-8'))
 
       except Exception as ex:
-        logging.warning('Type: ' + str(type(ex)))
-        logging.warning('Status: ' + str(response.status))
-        logging.warning('Reason: ' + response.reason)
-        logging.warning('Response: ' + xml_response.decode('UTF-8'))
+        logging.warning('Connection error: ' + str(type(ex).__name__) + ' - ' + str(ex))
+        if response is not None:
+          logging.warning('Status: ' + str(response.status))
+          logging.warning('Reason: ' + response.reason)
+        if xml_response is not None:
+          logging.warning('Response: ' + xml_response.decode('UTF-8'))
 
-        connection.close()
+        if connection is not None:
+          try:
+            connection.close()
+          except:
+            pass
         time.sleep(while_loop_sleep * 2)
         continue
 
