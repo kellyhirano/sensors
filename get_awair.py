@@ -6,6 +6,7 @@ import fcntl
 import sys
 import http.client
 import json
+import urllib.request
 import aqi
 import sqlite3
 import paho.mqtt.publish as publish
@@ -269,6 +270,22 @@ def publish_to_mqtt(mqtt_host, location, data, channel):
         print(payload)
 
 
+def ping_heartbeat(config):
+    """Ping heartbeat URL on successful run. Configure via sensor.conf [AWAIR] or [ALL] heartbeat_url."""
+    try:
+        url = config.get('AWAIR', 'heartbeat_url')
+    except configparser.NoOptionError:
+        try:
+            url = config.get('ALL', 'heartbeat_url')
+        except configparser.NoOptionError:
+            return
+    try:
+        urllib.request.urlopen(url, timeout=5).close()
+        print('Heartbeat pinged: ' + url)
+    except Exception as e:
+        print(f'Heartbeat ping failed: {e}')
+
+
 def main():
 
     config = configparser.ConfigParser()
@@ -298,6 +315,7 @@ def main():
 
     if not args.nomqtt:
         publish_to_mqtt(mqtt_host, location, storage_data, 'sensor')
+        ping_heartbeat(config)
 
 
 # This is the standard boilerplate that calls the main() function.

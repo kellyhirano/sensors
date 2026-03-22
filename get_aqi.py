@@ -6,6 +6,7 @@ import fcntl
 import sys
 import http.client
 import json
+import urllib.request
 import aqi
 import time
 import sqlite3
@@ -21,11 +22,11 @@ except IOError:
     sys.exit(0)
 
 
-def url_to_dict(host, uri):
+def url_to_dict(host, uri, headers=None):
     """Given a URI, fetch it, assume it's json an parse that into a dict"""
     try:
         connection = http.client.HTTPSConnection(host)
-        connection.request('GET', uri)
+        connection.request('GET', uri, headers=headers or {})
         response = connection.getresponse()
         output = response.read()
         output_dict = json.loads(output.decode('UTF-8'))
@@ -36,52 +37,39 @@ def url_to_dict(host, uri):
         print('problem reading url: ' + uri)
 
 
-def get_station_data(station_id):
+def get_station_data(station_id, api_key):
     """Given a station id, return station data in a dict"""
-    purpleair_host = 'www.purpleair.com'
-    purpleair_uri = '/json?show=' + str(station_id)
-    purple_air_data = url_to_dict(purpleair_host, purpleair_uri)
+    # PurpleAir v1 API (api.purpleair.com) — old www.purpleair.com/json was deprecated
+    host = 'api.purpleair.com'
+    uri = ('/v1/sensors/{}?fields=pm2.5,pm2.5_10minute,pm2.5_30minute,'
+           'pm2.5_60minute,pm2.5_6hour,pm2.5_24hour,pm2.5_1week,last_seen'
+           ).format(station_id)
+    data = url_to_dict(host, uri, headers={'X-API-Key': api_key})
 
-    # Init summary w/ empty list
+    sensor = data['sensor']
+    stats = sensor['stats']
+
+    # Map new API field names to legacy keys used by the rest of the code:
+    # v = Realtime, v1 = 10min, v2 = 30min, v3 = 1hr, v4 = 6hr, v5 = 24hr, v6 = 1wk
+    average = {
+        'v':  stats['pm2.5'],
+        'v1': stats['pm2.5_10minute'],
+        'v2': stats['pm2.5_30minute'],
+        'v3': stats['pm2.5_60minute'],
+        'v4': stats['pm2.5_6hour'],
+        'v5': stats['pm2.5_24hour'],
+        'v6': stats['pm2.5_1week'],
+    }
+
     summary = {}
-    summary['station_dicts'] = []
-    summary['total'] = {}
-    summary['average'] = {}
+    summary['station_dicts'] = [{'last_updated': sensor['last_seen']}]
+    summary['average'] = average
     summary['aqi'] = {}
     summary['lrapa_average'] = {}
     summary['lrapa_aqi'] = {}
 
-    # The endpoint returns all station data; find what we're looking for
-    for result in purple_air_data['results']:
-
-        # Some results include child nodes for some reason; skip those
-        if(int(result['ID']) != int(station_id)):
-            continue
-
-        stats_dict = json.loads(result['Stats'])
-        stats_dict['station'] = result['ID']
-        stats_dict['last_updated'] = result['LastSeen']
-        summary['station_dicts'].append(stats_dict)
-
-    # Loop through the keys we want to average,
-    # first sum, average, then calculate AQI
-    # v = Realtime
-    # v1 = Short-Term
-    # v2 = 30 min avg
-    # v3 = 1 hr avg
-    # v4 = 6 hr avg
-    # v5 = 24 hr avg
-    # v6 = 1 wk avg
     keys_to_avg = ['v', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6']
-    for station_dict in summary['station_dicts']:
-        for key in keys_to_avg:
-            if key not in summary['total']:
-                summary['total'][key] = 0
-            summary['total'][key] += station_dict[key]
-
-    num_stations = len(summary['station_dicts'])
     for key in keys_to_avg:
-        summary['average'][key] = summary['total'][key] / num_stations
         summary['aqi'][key] = int(aqi.to_iaqi(aqi.POLLUTANT_PM25,
                                               summary['average'][key],
                                               algo=aqi.ALGO_EPA))
@@ -182,12 +170,29 @@ def publish_to_mqtt(mqtt_host, payload, channel):
                    retain=True)
 
 
+def ping_heartbeat(config):
+    """Ping heartbeat URL on successful run. Configure via sensor.conf [PURPLEAIR] or [ALL] heartbeat_url."""
+    try:
+        url = config.get('PURPLEAIR', 'heartbeat_url')
+    except configparser.NoOptionError:
+        try:
+            url = config.get('ALL', 'heartbeat_url')
+        except configparser.NoOptionError:
+            return
+    try:
+        urllib.request.urlopen(url, timeout=5).close()
+        print('Heartbeat pinged: ' + url)
+    except Exception as e:
+        print(f'Heartbeat ping failed: {e}')
+
+
 def main():
     config = configparser.ConfigParser()
     config.read('sensor.conf')
 
     mqtt_host = config.get('ALL', 'mqtt_host')
     db_host = config.get('ALL', 'db_file')
+    api_key = config.get('PURPLEAIR', 'api_read_key')
 
     parser = argparse.ArgumentParser(description='Get AQI data from PurpleAir')
     parser.add_argument('station_ids', nargs='+', type=int)
@@ -204,7 +209,7 @@ def main():
     station_data = {}
 
     for station_id in args.station_ids:
-        station_data = get_station_data(station_id)
+        station_data = get_station_data(station_id, api_key)
 
         # Store time delta as first elem in tuple for sorting
         time_since_update = time_now \
@@ -251,6 +256,8 @@ def main():
                         + ', "st_lrapa_aqi": ' + str(last_hour_lrapa_aqi_diff)
                         + '}',
                         'last_hour')
+
+        ping_heartbeat(config)
 
 
 # This is the standard boilerplate that calls the main() function.

@@ -11,6 +11,8 @@ import base64
 import sqlite3
 import paho.mqtt.publish as publish
 import logging
+import logging.handlers
+import urllib.request
 
 # Only one proess allowed to be running
 lock_file = '/tmp/rainforest.exists'
@@ -269,7 +271,7 @@ def extract_load_from_xml(raw_xml):
 
   except (ET.ParseError):
     logging.warning('Failed to parse XML from Rainforest')
-    logging.warning(xml_response)
+    logging.warning(raw_xml)
 
   ## Will return 'None" on error/no match
 
@@ -283,10 +285,14 @@ def main():
     config = configparser.ConfigParser()
     config.read('sensor.conf')
 
-    logging.basicConfig(filename=config.get('ALL', 'base_dir') + '/rainforest.log',
-                        format="%(asctime)s %(levelname)-8s %(message)s",
-                        datefmt="%Y-%m-%d %H:%M:%S",
-                        level=logging.WARN)
+    log_file = config.get('ALL', 'base_dir') + '/rainforest.log'
+    handler = logging.handlers.RotatingFileHandler(
+        log_file, maxBytes=1024*1024, backupCount=3)
+    handler.setFormatter(logging.Formatter(
+        fmt="%(asctime)s %(levelname)-8s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"))
+    logging.getLogger().addHandler(handler)
+    logging.getLogger().setLevel(logging.WARN)
 
     request_body = create_request_body(config, logging)
     request_headers = create_request_headers(config, logging)
@@ -296,6 +302,10 @@ def main():
     while_loop_sleep = 3
     mqtt_host = config.get('ALL', 'mqtt_host')
     db_file = config.get('ALL', 'db_file')
+    try:
+        heartbeat_url = config.get('RAINFOREST', 'heartbeat_url')
+    except configparser.NoOptionError:
+        heartbeat_url = None
 
     while True:
 
@@ -351,6 +361,11 @@ def main():
         if curr_time[4] % 5 == 0 and curr_time[4] != last_aggregate_minute:
           last_aggregate_minute = curr_time[4]
           publish_aggregate_metrics(db_file, mqtt_host)
+          if heartbeat_url:
+            try:
+              urllib.request.urlopen(heartbeat_url, timeout=5).close()
+            except Exception:
+              pass
 
       connection.close()
       time.sleep(while_loop_sleep)
