@@ -11,6 +11,9 @@ import aqi
 import sqlite3
 import paho.mqtt.publish as publish
 
+SQLITE_TIMEOUT_SECONDS = 30
+HTTP_TIMEOUT_SECONDS = 30
+
 # Only one proess allowed to be running
 lock_file = '/tmp/awair.exists'
 fp = open(lock_file, 'w')
@@ -19,6 +22,14 @@ try:
 except IOError:
     print('Only one instance may run. Delete lockfile ' + lock_file)
     sys.exit(0)
+
+
+def connect_db(db_file):
+    """Open SQLite with a wait window so transient locks don't fail writes."""
+    con = sqlite3.connect(db_file, timeout=SQLITE_TIMEOUT_SECONDS)
+    con.execute(
+        'PRAGMA busy_timeout = {}'.format(SQLITE_TIMEOUT_SECONDS * 1000))
+    return con
 
 
 class AwairAPI():
@@ -36,7 +47,8 @@ class AwairAPI():
         """URI sent to __api_host with results returned to a dict"""
 
         try:
-            connection = http.client.HTTPSConnection(self.__api_host)
+            connection = http.client.HTTPSConnection(
+                self.__api_host, timeout=HTTP_TIMEOUT_SECONDS)
             headers = {'Authorization': 'Bearer ' + self.__auth_token}
             connection.request('GET', uri, headers=headers)
             response = connection.getresponse()
@@ -121,7 +133,7 @@ def save_data_to_db(db_file, storage_data):
     """Save Awair data to local sensor sqlite3 file"""
 
     # Connect to the db, get a cursor
-    con = sqlite3.connect(db_file)
+    con = connect_db(db_file)
     cur = con.cursor()
 
     # Collect the data of tuples into an array
@@ -151,7 +163,7 @@ def add_last_hour_data(db_file, storage_data):
     diff_data = []
 
     # Connect to the db
-    con = sqlite3.connect(db_file)
+    con = connect_db(db_file)
 
     # Set this to allow for dictionary lookups for row returns
     # Must set this before even getting a cursor
@@ -210,7 +222,7 @@ def add_last_hour_dust(db_file, storage_data):
     """Add last hour dust separately; diff func needed because of AQI calc"""
 
     # Connect to the db
-    con = sqlite3.connect(db_file)
+    con = connect_db(db_file)
 
     # Set this to allow for dictionary lookups for row returns
     # Must set this before even getting a cursor

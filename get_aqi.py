@@ -12,6 +12,9 @@ import time
 import sqlite3
 import paho.mqtt.publish as publish
 
+SQLITE_TIMEOUT_SECONDS = 30
+HTTP_TIMEOUT_SECONDS = 30
+
 # Only one proess allowed to be running
 lock_file = '/tmp/aqi.exists'
 fp = open(lock_file, 'w')
@@ -25,7 +28,8 @@ except IOError:
 def url_to_dict(host, uri, headers=None):
     """Given a URI, fetch it, assume it's json an parse that into a dict"""
     try:
-        connection = http.client.HTTPSConnection(host)
+        connection = http.client.HTTPSConnection(host,
+                                                 timeout=HTTP_TIMEOUT_SECONDS)
         connection.request('GET', uri, headers=headers or {})
         response = connection.getresponse()
         output = response.read()
@@ -35,6 +39,14 @@ def url_to_dict(host, uri, headers=None):
 
     except IOError:
         print('problem reading url: ' + uri)
+
+
+def connect_db(db_host):
+    """Open SQLite with a wait window so transient locks don't fail writes."""
+    con = sqlite3.connect(db_host, timeout=SQLITE_TIMEOUT_SECONDS)
+    con.execute(
+        'PRAGMA busy_timeout = {}'.format(SQLITE_TIMEOUT_SECONDS * 1000))
+    return con
 
 
 def get_station_data(station_id, api_key):
@@ -113,7 +125,7 @@ def get_aqi_description(aqi):
 def save_data_to_db(db_host, station_data):
     """Save current readings into the purple_air table"""
 
-    con = sqlite3.connect(db_host)
+    con = connect_db(db_host)
     cur = con.cursor()
 
     # Collect the data of tuples into an array
@@ -137,7 +149,7 @@ def save_data_to_db(db_host, station_data):
 def get_last_hour_aqi_diff(db_host, station_data):
     """Get last hour AQI diff of v1 and return that value"""
 
-    con = sqlite3.connect(db_host)
+    con = connect_db(db_host)
     cur = con.cursor()
 
     statement = """select aqi, lrapa_aqi
