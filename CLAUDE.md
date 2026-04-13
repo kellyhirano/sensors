@@ -10,6 +10,8 @@ Python scripts that poll IoT sensors and publish JSON to MQTT (with `retain=True
 |--------|------|----------|
 | `get_awair.py` | One-shot | cron */10m |
 | `get_aqi.py` | One-shot | cron */10m |
+| `get_pool.py` | One-shot | cron */5m |
+| `weather.pl` | One-shot | cron */10m |
 | `rainforest_loop.py` | Continuous | systemd service |
 
 ## Configuration (`sensor.conf`, gitignored — note: NOT `sensors.conf`)
@@ -38,6 +40,20 @@ eagle_ip = <local IP>
 - `purpleair/last_hour` — hour delta (legacy, kept for compat)
 - `rainforest/load` — instantaneous kW (every 3s)
 - `rainforest/hourly`, `rainforest/24h_compare`, `rainforest/daily`, `rainforest/peak` — every 5min
+- `pool/sensor` — pool_temp, pool_pump, pool_heater, spa_heater, pool_light (from Home Assistant)
+- `weathergov/forecast` — NWS API 7-day forecast (replaces HTML scraping)
+- `weathergov/warnings` — NWS active alerts for point 37.3228,-122.0566
+- `weathergov/temptrend` — 7-day temp chart data (-3..+3 days): actual (weewx), forecast (NWS), normals (NCEI), records (GHCND KSJC)
+
+## Verification
+
+```bash
+# Verify NWS API forecast vs old HTML scraping (prints side-by-side, no MQTT publish)
+cd /home/pi/sensors && perl weather.pl --verify-forecast
+
+# Check temptrend topic after deploy
+mosquitto_sub -h 10.0.110.85 -t weathergov/temptrend --retained-only -C 1
+```
 
 ## Key Patterns
 
