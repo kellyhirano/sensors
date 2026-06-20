@@ -25,6 +25,34 @@ Script: `get_aqi.py`. Usage `get_aqi.py <station_id>`. You can get your station 
 
 A `purple_air` sqlite3 table needs to be created in the `db_file` using the `purple_air.sql` schema. 
 
+## Pollen
+Script: `get_pollen.py`. Usage `python3 get_pollen.py`. It fetches the daily tree, grass, and weed forecast from the Google Pollen API and publishes it to `pollen/sensor`.
+
+The following config entry is required:
+
+    [POLLEN]
+    api_key: <Google Pollen API key>
+    latitude: <home latitude>
+    longitude: <home longitude>
+    heartbeat_url: <optional uptime kuma push url>
+
+This collector is deployed on the `sensors` host through `ansible/playbooks/sensors-deploy.yml` as an hourly cron job. Do not add or edit the cron line manually on the Pi.
+
+## SJ Water
+Script: `get_water.py`. Usage `python3 get_water.py`. It logs in to SJWaterHUB, calls the VXEngage hourly usage graph endpoint, stores returned hourly intervals in SQLite, publishes retained MQTT summaries to `sjwater/daily` and `sjwater/hourly`, and publishes retained Home Assistant MQTT discovery configs for those sensors. Values are gallons rounded by the portal to whole gallons.
+
+The following config entry is required. Use `RawConfigParser`, so `%` characters in the password are literal and should not be escaped.
+
+    [SJWATER]
+    username: <sjwaterhub.com email>
+    password: <sjwaterhub.com password>
+    account_number: <account number from sjwaterhub.com>
+    heartbeat_url: <optional uptime kuma push url>
+
+This collector is deployed on the `sensors` host through `ansible/playbooks/sensors-deploy.yml` every 4 hours to avoid hitting the customer portal unnecessarily. Do not add or edit the cron line manually on the Pi.
+
+Home Assistant consumes this through retained MQTT discovery published by the collector. Expected entities are `sensor.sj_water_smart_meter_daily_usage`, `sensor.sj_water_smart_meter_hourly_usage`, and `sensor.sj_water_smart_meter_portal_last_updated`. If HA appears stale while MQTT is populated, check `Portal Last Updated`; SJWaterHUB may be returning an old `last_updated` timestamp and unchanged `0.0` gallon values.
+
 ## Rainforest
 Script: `rainforest_loop.py`. Usage `rainforest_loop.py`. This connects to a
 local [Rainforest EAGLE
