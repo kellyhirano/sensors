@@ -324,7 +324,7 @@ def ping_heartbeat(config):
         return
     try:
         urllib.request.urlopen(url, timeout=5).close()
-        print('Heartbeat pinged: ' + url)
+        print('Heartbeat pinged')
     except Exception as e:
         print('Heartbeat ping failed: ' + str(e))
 

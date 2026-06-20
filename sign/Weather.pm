@@ -39,7 +39,7 @@ sub updateCurrentConditions {
     my ($self) = @_;
 
     my $statement = qq(SELECT
-                     outTemp, rainRate, outHumidity, barometer
+                     outTemp, rainRate, outHumidity, barometer, rain
                      from archive
                      order by datetime desc limit 1);
     if ( my @row = $self->executeQuery($statement, $dbh) ) {
@@ -50,6 +50,7 @@ sub updateCurrentConditions {
         $self->{inHumidity}    = $in_humid;
         $self->{outHumidity}   = sprintf("%.1f", $row[2]);
         $self->{barometer}     = sprintf("%.2f", $row[3]);
+        $self->{intervalRain}  = sprintf("%.4f", $row[4] // 0);
     }
 }
 
@@ -461,6 +462,7 @@ sub getOutsideHumid  { my ($self) = @_; return $self->{outHumidity}; }
 sub getBarometer     { my ($self) = @_; return $self->{barometer}; }
 sub getRainRate      { my ($self) = @_; return $self->{rainRate}; }
 sub getRain          { my ($self) = @_; return $self->{rain}; }
+sub getIntervalRain  { my ($self) = @_; return $self->{intervalRain}; }
 sub getWindGust      { my ($self) = @_; return $self->{wind_gust}; }
 sub getWarningText   { my ($self) = @_; return $self->{ar_warning_text}; }
 

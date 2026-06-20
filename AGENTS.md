@@ -4,6 +4,7 @@
 This repo contains Python 3 collectors that read IoT device data, persist to SQLite, and publish to MQTT.
 
 - `get_awair.py`, `get_aqi.py`: one-shot collectors for Awair and PurpleAir.
+- `get_pool.py`, `get_pollen.py`: one-shot collectors for pool and pollen data.
 - `rainforest_loop.py`: continuous collector for the Rainforest EAGLE-3.
 - `awair.sql`, `purple_air.sql`, `rainforest.sql`: SQLite schemas.
 - `sensor.conf`: runtime config (not tracked).
@@ -24,6 +25,8 @@ This repo contains Python 3 collectors that read IoT device data, persist to SQL
 | `awair/<location>/<room>/sensor` | Awair readings and hourly deltas. |
 | `purpleair/sensor` | Current AQI values. |
 | `purpleair/last_hour` | AQI delta (legacy). |
+| `pool/sensor` | Pool status and temperature from Home Assistant. |
+| `pollen/sensor` | Tree/grass/weed pollen forecast from Google Pollen API. |
 | `rainforest/load` | Instantaneous kW demand. |
 | `rainforest/hourly` | 60-minute average kW. |
 | `rainforest/24h_compare` | Current vs 24h-ago. |
@@ -39,5 +42,6 @@ This repo contains Python 3 collectors that read IoT device data, persist to SQL
 - PRs should note new MQTT topics or schema changes and include sample payloads.
 
 ## Configuration & Ops Notes
-- `sensor.conf` is required and uses INI format with `[ALL]`, `[AWAIR]`, and `[RAINFOREST]` sections.
+- `sensor.conf` is required and uses INI format with `[ALL]`, `[AWAIR]`, `[PURPLEAIR]`, `[POLLEN]`, and `[RAINFOREST]` sections as needed by enabled collectors.
+- New collectors are not operational until `ansible/playbooks/sensors-deploy.yml` manages their cron/systemd wiring and preflights any required `sensor.conf` keys on the `sensors` host.
 - When adding a new sensor, add a schema file and document it in `README.md`.

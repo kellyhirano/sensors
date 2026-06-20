@@ -174,8 +174,8 @@ def add_last_hour_data(db_file, storage_data):
     statement = """select *
                    from awair
                    where uuid = ?
-                   and strftime('%s', 'now')
-                       - strftime('%s', datetime) > ( 60*60 )
+                   and datetime < strftime('%Y-%m-%dT%H:%M:%fZ',
+                                           'now', '-1 hour')
                    order by datetime desc limit 1"""
 
     # Loop through the list of dictionaries for storage data
@@ -233,8 +233,8 @@ def add_last_hour_dust(db_file, storage_data):
     statement = """select
                    uuid, avg(dust)
                    from awair
-                   where strftime('%s', 'now') - strftime('%s', datetime)
-                         < ( 60*60 )
+                   where datetime >= strftime('%Y-%m-%dT%H:%M:%fZ',
+                                              'now', '-1 hour')
                    and dust != ''
                    group by uuid"""
 
@@ -306,7 +306,7 @@ def main():
     mqtt_host = config.get('ALL', 'mqtt_host')
     db_file = config.get('ALL', 'db_file')
     auth_token = config.get('AWAIR', 'auth_token_api')
-    location = config.get('AWAIR', 'location')
+    location = config.get('AWAIR', 'location', fallback=None)
 
     parser = argparse.ArgumentParser(description='Get data from Awair device')
     parser.add_argument('--nosave', action='store_const',
