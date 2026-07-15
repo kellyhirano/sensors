@@ -61,7 +61,7 @@ heartbeat_url = <uptime kuma push url>
 - `homeassistant/sensor/sjwater_*_usage/config` and `homeassistant/sensor/sjwater_portal_last_updated/config` — retained MQTT discovery configs published by `get_water.py`
 - `weathergov/forecast` — NWS API 7-day forecast (replaces HTML scraping)
 - `weathergov/warnings` — NWS active alerts for point 37.3228,-122.0566
-- `weathergov/temptrend` — 7-day temp chart data (-3..+3 days): actual (weewx), forecast (NWS), normals (NCEI), records (GHCND KSJC)
+- `weathergov/temptrend` — 7-day temp chart data (-3..+3 days): actual (weewx), forecast (NWS), normals (NCEI 1991-2020, station USW00023293), records (GHCND, min/max blended across airport USW00023293 1998-present + long-history COOP USC00047821 1893-2007, so records reflect true ~130-year extremes not just the airport's 1998+ data)
 
 ## Verification
 
@@ -75,7 +75,7 @@ mosquitto_sub -h 10.0.110.85 -t weathergov/temptrend --retained-only -C 1
 
 ## SJ Water HA Notes
 
-`get_water.py` runs on the kitchen Pi, not Lenovo, and publishes retained MQTT discovery for HA. Expected HA entities are `sensor.sj_water_smart_meter_daily_usage`, `sensor.sj_water_smart_meter_hourly_usage`, and `sensor.sj_water_smart_meter_portal_last_updated`. If daily/hourly stay at `0.0`, first check the portal timestamp sensor or the `last_updated` attribute; on 2026-06-19 the end-to-end path was working but SJWaterHUB was still reporting `2026-06-19T07:00:00-07:00` with zero gallons. Verify with `cd /home/pi/sensors && ./get_water.py --nomqtt --nosave --verbose` on kitchen and retained MQTT topics `sjwater/daily`, `sjwater/hourly`, and `homeassistant/sensor/sjwater_*/config`.
+`get_water.py` runs on the kitchen Pi, not Lenovo, and publishes retained MQTT discovery for HA. Expected HA entities are `sensor.sj_water_smart_meter_daily_usage`, `sensor.sj_water_smart_meter_hourly_usage`, and `sensor.sj_water_smart_meter_portal_last_updated`. It requests a bounded 7-day hourly graph window from SJWaterHUB, then imports DB-backed long-term stats into HA as `sjwater:water_hourly`. If daily/hourly stay at `0.0` or the 24h chart is stuck, first check the portal timestamp sensor or the `last_updated` attribute; the portal API itself can lag. On 2026-07-10, direct `VXengage_GetHourlyGraph` calls for `2026-07-10` returned no July 10 labels and `LastUpdated` was still `2026-07-09T23:00:00-07:00`, so HA was accurately reflecting stale portal API data. Verify with `cd /home/pi/sensors && ./get_water.py --nomqtt --nosave --verbose` on kitchen and retained MQTT topics `sjwater/daily`, `sjwater/hourly`, and `homeassistant/sensor/sjwater_*/config`.
 
 ## Key Patterns
 

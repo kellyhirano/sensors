@@ -4,12 +4,19 @@ package Weather;
 
 use DBI;
 use Time::ParseDate;
+use Time::Local qw(timegm);
+use JSON::PP;
 use Data::Dumper;
 use strict;
 
-# weather.gov url
-my $k_forecast_url =
-'https://forecast.weather.gov/MapClick.php?lat=37.3228&lon=-122.0566#.WaGn7BmGMxw';
+# NWS API (api.weather.gov). Replaces the old forecast.weather.gov HTML
+# scrape, which stopped returning usable markup. Gridpoint MTR/93,83 covers
+# 37.3228,-122.0566 -- the same point/gridpoint weather.pl already uses.
+my $k_nws_forecast_url = 'https://api.weather.gov/gridpoints/MTR/93,83/forecast';
+my $k_nws_alerts_url   =
+    'https://api.weather.gov/alerts/active?point=37.3228%2C-122.0566';
+# api.weather.gov requires a self-identifying User-Agent or it returns 403.
+my $k_nws_user_agent   = '(home sign)';
 my $k_min_display_wind = 10;
 
 my $driver   = 'SQLite';
@@ -17,20 +24,22 @@ my $database = '/var/lib/weewx/weewx.sdb';
 my $userid   = '';
 my $password = '';
 my $dbs      = "DBI:$driver:dbname=$database";
-my $dbh      = DBI->connect( $dbs, $userid, $password, { RaiseError => 1 } )
-  or die $DBI::errstr;
+my $dbh = eval { DBI->connect( $dbs, $userid, $password, { RaiseError => 1 } ) };
+warn "Weather: weewx DB connect failed: $@" if $@;
 
 my $awair_database = '/home/pi/sensors/sensors.db';
 my $awair_userid   = '';
 my $awair_password = '';
 my $awair_dbs      = "DBI:$driver:dbname=$awair_database";
-my $awair_dbh      = DBI->connect( $awair_dbs, $awair_userid, $awair_password, { RaiseError => 1 } )
-  or die $DBI::errstr;
+my $awair_dbh = eval { DBI->connect( $awair_dbs, $awair_userid, $awair_password, { RaiseError => 1 } ) };
+warn "Weather: awair DB connect failed: $@" if $@;
 
 sub new {
     my ($class, $args) = @_;
+    $args ||= {};
     my $self  = { exclude_forecast => $args->{exclude_forecast} || 0 };
     bless $self, $class;
+    $self->clearForecastData();
     $self->updateData();
     return $self;
 }
@@ -154,11 +163,16 @@ sub updateHourTempDiff {
 sub executeQuery {
     my ( $self, $statement, $this_dbh) = @_;
 
-    my $sth = $this_dbh->prepare($statement);
-    my $rv = $sth->execute() or die $DBI::errstr;
-    print $DBI::errstr if ( $rv < 0 );
-    my @row = $sth->fetchrow_array();
-    $sth->finish();
+    return () unless defined $this_dbh;
+
+    my @row;
+    eval {
+        my $sth = $this_dbh->prepare($statement);
+        $sth->execute();
+        @row = $sth->fetchrow_array();
+        $sth->finish();
+    };
+    warn "Weather: query failed: $@" if $@;
 
     return @row;
 }
@@ -263,184 +277,72 @@ sub calcPrecipChanceSeverity {
 sub updateForecast {
     my ($self) = @_;
 
-    my $response_body = undef;
-
-    eval {
-        local $SIG{ALRM} = sub { die "alarm\n" };    # NB: \n required
-        alarm 75;
-        $response_body = `curl -m 60 -s "$k_forecast_url"`;
-        alarm 0;
-    };
-
-    # timed out
-    if ($@) {
-        die unless $@ eq "alarm\n";    # propagate unexpected errors
+    my $data = $self->fetchNwsJson($k_nws_forecast_url);
+    unless ( $data && ref($data->{properties}{periods}) eq 'ARRAY' ) {
+        warn "Weather: NWS forecast response did not contain periods\n";
+        $self->clearForecastData();
         return undef;
     }
+    my $periods = $data->{properties}{periods};
 
-    my @forecast_text = ();
-    my @precip_amounts = ();
-    while ( $response_body =~
-        /<li class="forecast-tombstone">.+?alt="([^"]+)".+?<\/li>/sg )
-    {
-        my $forecast_text = $1;
+    my @forecast_text              = ();
+    my @forecast_temps             = ();
+    my @forecast_temps_with_precip = ();
+    my @forecast_temps_with_label  = ();
+    my @short_forecasts            = ();
+    my @precip_chances             = ();
+    my @precip_severities          = ();
+    my @precip_amounts             = ();
 
-        # debug
-        print "ORIG (" . length($forecast_text) . ") $forecast_text\n";
+    for my $period (@$periods) {
+        my $name     = $period->{name}             // '';
+        my $temp     = $period->{temperature}      // '';
+        my $short    = ucfirst( lc( $period->{shortForecast} // '' ) );
+        my $detailed = $period->{detailedForecast} // '';
 
-        # abbreviations
-        $forecast_text =~ s/ percent/%/g;
-        $forecast_text =~ s/\bnorth/N/ig;
-        $forecast_text =~ s/\bsouth/S/ig;
-        $forecast_text =~ s/west\b/W/ig;
-        $forecast_text =~ s/east\b/E/ig;
-        $forecast_text =~ s/\b([A-Z]) ([A-Z]{2})\b/$1$2/g;    # N NW -> NNW
-        $forecast_text =~ s/(precip)itation/$1/ig;
-        $forecast_text =~ s/thunderstorm/t'storm/ig;
-        $forecast_text =~ s/(temp)erature/$1/ig;
-        $forecast_text =~ s/(decr)easing/$1/ig;
-        $forecast_text =~ s/(incr)easing/$1/ig;
-        $forecast_text =~ s/(?:then )becoming/->/ig;
-        $forecast_text =~ s/, ->/ ->/ig;
+        # Scrolling detailed forecast. detailedForecast has no period prefix,
+        # so prepend the period name before abbreviating.
+        my $ftext = $self->abbrevForecast( uc($name) . ': ' . $detailed );
+        push( @forecast_text, $ftext );
+        push( @precip_amounts, $self->extractPrecipAmount($ftext) );
 
-        # approximiations
-        $forecast_text =~ s/ near//ig;
-        $forecast_text =~ s/ slight//ig;
-        $forecast_text =~ s/ around//ig;
-        $forecast_text =~ s/ possible//ig;
-        $forecast_text =~ s/ possibly//ig;
-        $forecast_text =~ s/ at times//ig;
-        $forecast_text =~ s/ with(?: an?)?//ig;
-        $forecast_text =~ s/as high as //ig;
-
-        # other words to remove
-        $forecast_text =~ s/ gradually//ig;
-        $forecast_text =~ s/ of the//ig;
-        $forecast_text =~ s/ mph//ig;
-
-        # small numbers
-        $forecast_text =~ s/(?: amounts|accumulation) of less than/ </ig;
-        $forecast_text =~ s/(?: amounts|accumulation) of more than/ >/ig;
-        $forecast_text =~ s/(?: a)? tenth(?:(?: of an)? inch)?/ .1"/ig;
-        $forecast_text =~ s/ three quarters(?:(?: of an)? inch)?/ .75"/ig;
-        $forecast_text =~ s/(?: a)? quarter(?:(?: of an)? inch)?/ .25"/ig;
-        $forecast_text =~ s/(?: a)? half(?:(?: of an)? inch)?/ .5"/ig;
-        $forecast_text =~ s/ one inch/ 1"/ig;
-        $forecast_text =~ s/(?: amounts)? between (.*?) and (.*?)\./ $1-$2\./ig;
-        $forecast_text =~ s/(\d+) to (\d+)/$1-$2/ig;
-        $forecast_text =~ s/ inches?\b/"/ig;
-
-        # spaces
-        $forecast_text =~ s/\s+$//;
-        $forecast_text =~ s/\s{2,}/ /g;
-        $forecast_text =~ s/< /</g;
-
-        # more cleaning
-        $forecast_text =~ s/Winds could gust/Gusts to/;
-        $forecast_text =~ s/Chance of precip is/Precip chance/;
-        $forecast_text =~ s/except higher amounts/higher/;
-        $forecast_text =~ s/in the/in/;
-        $forecast_text =~ s/ and /\//;
-
-        # uc day/time period
-        $forecast_text =~ s/^([^:]+):\s+(\w+)/uc($1) . ': ' . ucfirst($2)/e;
-
-        # only show interesting wind if there's a wind speed
-        if ( $forecast_text =~ /\.\s.+?\bwinds?\b.+?(\d+)\smph[^.]*\./ ) {
-            my $max_wind = $1;    # assume last number is the largest
-
-            # make sure the wind is above the min display; light wind is boring
-            if ( $max_wind < $k_min_display_wind ) {
-                $forecast_text =~ s/\..+?\bwinds?\b.+?\././;
-            }
-        }
-
-        # "light ... wind" is also boring
-        $forecast_text =~ s/\..+?\blight\b.+?winds?.*?\././i;
-
-        # fix two "'s from previous changes
-        if ( $forecast_text =~ /".+"/ ) {
-             $forecast_text =~ s/^(.*?)"/$1/;
-        }
-
-        # extract precip amounts
-        my $precip_amount = 0;
-        if ( $forecast_text =~ /(\S+").*?$/ ) {
-            $precip_amount = $1;
-        }
-        push( @precip_amounts, $precip_amount );
-
-        # debug
-        print "(" . length($forecast_text)
-              . ") $forecast_text, $precip_amount\n";
-
-        push( @forecast_text, $forecast_text );
-
-    }
-
-    my @forecast_temps            = ();
-    my @forecast_temps_with_label = ();
-    while ( $response_body =~ /temp-(?:high|low)">(.+?)<\/p>/sg ) {
-        my $temp = $1;
-        $temp =~ s/<span[^>]+>[^<]+<\/span>//
-          ;    # sometimes there's a &dArr; or &uArr; in there
-        $temp =~ s/(\d)[^\d]+$/$1/;    # only keep the numbers
-        $temp =~ s/High:/H/;
-        $temp =~ s/Low:/L/;
-        push( @forecast_temps_with_label, $temp . chr(130) );
-        $temp =~ s/H //;
-        $temp =~ s/L //;
+        # Daytime periods carry the high, overnight periods the low.
+        my $label = $period->{isDaytime} ? 'H' : 'L';
+        push( @forecast_temps_with_label, "$label $temp" . chr(130) );
         push( @forecast_temps, $temp . chr(130) );
-    }
 
-    # yes, this is stupid and should fit into the same while loop as above.
-    # first shot had weird failures where the low temps weren't caputred,
-    # but the highs were. this needs to be figured out to get rid of this
-    # second loop.
-    my @short_forecasts = ();
-    my @precip_chances = ();
-    my @precip_severities = ();
-    my @forecast_temps_with_precip = @forecast_temps;
-    my $count = 0;
-    while ( $response_body =~
-        /p class="period-name">(.+?)<\/p>.+?title="(.*?)".+?class="short-desc">(.+?)<\/p/sg )
-    {
-        my $time_period   = $1;
-        my $time_title    = $2;
-        my $forecast_text = ucfirst( lc($3) );
+        # Short forecast string (used by weather.pl --verify-forecast).
+        ( my $short_clean = $short ) =~ s/\./,/g;
+        push( @short_forecasts, uc($name) . ": $short_clean" );
 
-        print STDERR ("FORECAST: $time_period|$time_title|$forecast_text\n");
-
-        next unless ( $time_title ); # If there's an active advisory, there's no title
-
-        $time_period =~ s/<br>/ /g;
-        $time_period =~ s/\s+$//;
-        $forecast_text =~ s/<br>/ /g;
-        $forecast_text =~ s/\./,/g;
-        push( @short_forecasts, uc($time_period) . ": $forecast_text" );
-
-        my ( $precip_chance, $precip_severity ) = $self->calcPrecipChanceSeverity($forecast_text);
-
-        if ( $precip_chance ) {
-          ## Math offset to get the right degree with precip char;
-          ## all offsets from the base char, 130
-          my $precip_degree_ascii = 130 + ( ( $precip_severity - 1 ) * 3 ) + $precip_chance;
-          $forecast_temps_with_precip[$count] =~ s/\x82/chr($precip_degree_ascii)/e;
+        # Encode precip chance/severity into the degree glyph, same math and
+        # base char (130) the sign has always used.
+        my ( $precip_chance, $precip_severity ) =
+            $self->calcPrecipChanceSeverity("$short $detailed");
+        $precip_chance = $self->precipChanceLevel($period, $precip_chance);
+        $precip_severity ||= 2 if $precip_chance;
+        my $temp_with_precip = $temp . chr(130);
+        if ($precip_chance) {
+            my $precip_degree_ascii =
+                130 + ( ( $precip_severity - 1 ) * 3 ) + $precip_chance;
+            $temp_with_precip = $temp . chr($precip_degree_ascii);
         }
+        push( @forecast_temps_with_precip, $temp_with_precip );
+        push( @precip_chances, $precip_chance );
+        push( @precip_severities, $precip_severity );
 
-        push ( @precip_chances, $precip_chance );
-        push ( @precip_severities, $precip_severity );
-        print STDERR "$forecast_text, $precip_severity, $precip_chance\n";
-        $count++;
+        print STDERR "FORECAST: $name | $temp | $short "
+            . "(sev $precip_severity chc $precip_chance)\n";
     }
 
-    # grab any headline-details
-    # Future: "Excessive Heat Warning September 1, 11:00am until September 4, 09:00pm"
-    # Current: "Flash Flood Watch until September 1, 01:00pm"
+    # Active warnings/advisories from the NWS alerts endpoint.
     my @warning_text = ();
-    if ( $response_body =~ /div id="headline-detail"><div>(.+?)<\/div><\/div>/s ) {
-      my @headline_detail = split ( /<\/div><div>/, $1 );
-      @warning_text = $self->parseAndFormatWarningText( \@headline_detail );
+    my $alerts = $self->fetchNwsJson($k_nws_alerts_url);
+    if ( $alerts && $alerts->{features} ) {
+        for my $feature ( @{ $alerts->{features} } ) {
+            my $formatted = $self->formatNwsAlert($feature->{properties} // {});
+            push( @warning_text, $formatted ) if $formatted;
+        }
     }
 
     $self->{ar_forecast_text}              = \@forecast_text;
@@ -452,6 +354,185 @@ sub updateForecast {
     $self->{ar_precip_severities}          = \@precip_severities;
     $self->{ar_warning_text}               = \@warning_text;
     $self->{ar_precip_amounts}             = \@precip_amounts;
+}
+
+sub clearForecastData {
+    my ($self) = @_;
+
+    $self->{ar_forecast_text}              = [];
+    $self->{ar_forecast_temps}             = [];
+    $self->{ar_forecast_temps_with_precip} = [];
+    $self->{ar_forecast_temps_with_label}  = [];
+    $self->{ar_short_forecasts}            = [];
+    $self->{ar_precip_chances}             = [];
+    $self->{ar_precip_severities}          = [];
+    $self->{ar_warning_text}               = [];
+    $self->{ar_precip_amounts}             = [];
+}
+
+sub precipChanceLevel {
+    my ( $self, $period, $fallback_level ) = @_;
+
+    my $pop = $period->{probabilityOfPrecipitation};
+    return $fallback_level unless ref($pop) eq 'HASH' && defined $pop->{value};
+    return 0 unless $pop->{value} > 0;
+    return 3 if $pop->{value} >= 70;
+    return 2 if $pop->{value} >= 40;
+    return 1;
+}
+
+sub formatNwsAlert {
+    my ( $self, $props ) = @_;
+
+    my $event = uc( $props->{event} // '' );
+    return undef unless $event;
+
+    my $start_epoch = $self->parseNwsTime( $props->{onset} || $props->{effective} );
+    my $end_epoch   = $self->parseNwsTime( $props->{ends} || $props->{expires} );
+    my @output = ( ">> $event <<" );
+
+    if ( $start_epoch && $start_epoch > time + 60 ) {
+        push( @output, $self->formatLocaltime( [ localtime($start_epoch) ] ) );
+        push( @output, '-' );
+    } else {
+        push( @output, 'Now thru' );
+    }
+
+    push( @output, $self->formatLocaltime( [ localtime($end_epoch) ] ) )
+        if $end_epoch;
+    return join( ' ', @output );
+}
+
+sub parseNwsTime {
+    my ( $self, $time_str ) = @_;
+    return undef unless $time_str;
+    if ( $time_str =~ /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(Z|[+-]\d{2}:\d{2})/ ) {
+        my ( $year, $mon, $mday, $hour, $min, $sec, $offset ) =
+            ( $1, $2, $3, $4, $5, $6, $7 );
+        my $epoch = timegm( $sec, $min, $hour, $mday, $mon - 1, $year );
+        if ( $offset ne 'Z' && $offset =~ /^([+-])(\d{2}):(\d{2})$/ ) {
+            my $offset_seconds = ( $2 * 3600 ) + ( $3 * 60 );
+            $epoch -= $1 eq '+' ? $offset_seconds : -$offset_seconds;
+        }
+        return $epoch;
+    }
+    return parsedate($time_str);
+}
+
+sub fetchNwsJson {
+    my ( $self, $url ) = @_;
+
+    my $json_str;
+    eval {
+        local $SIG{ALRM} = sub { die "alarm\n" };    # NB: \n required
+        alarm 75;
+        $json_str = `curl -m 60 -fsS -H 'User-Agent: $k_nws_user_agent' -H 'Accept: application/geo+json,application/json' "$url"`;
+        alarm 0;
+    };
+
+    # timed out or curl failed
+    if ($@) {
+        die unless $@ eq "alarm\n";    # propagate unexpected errors
+        return undef;
+    }
+
+    if ( $? != 0 ) {
+        warn "Weather: curl failed for $url\n";
+        return undef;
+    }
+
+    my $data = eval { decode_json($json_str) };
+    warn "Weather: JSON decode failed for $url: $@\n" if $@;
+    return $data;
+}
+
+sub extractPrecipAmount {
+    my ( $self, $forecast_text ) = @_;
+    return $1 if ( $forecast_text =~ /(\S+").*?$/ );
+    return 0;
+}
+
+# Abbreviate a forecast string down to something that fits the LED sign.
+# Started from the old HTML-scraping cleanup so wording stays familiar.
+sub abbrevForecast {
+    my ( $self, $forecast_text ) = @_;
+
+    # abbreviations
+    $forecast_text =~ s/ percent/%/g;
+    $forecast_text =~ s/\bnorth/N/ig;
+    $forecast_text =~ s/\bsouth/S/ig;
+    $forecast_text =~ s/west\b/W/ig;
+    $forecast_text =~ s/east\b/E/ig;
+    $forecast_text =~ s/\b([A-Z]) ([A-Z]{2})\b/$1$2/g;    # N NW -> NNW
+    $forecast_text =~ s/(precip)itation/$1/ig;
+    $forecast_text =~ s/thunderstorm/t'storm/ig;
+    $forecast_text =~ s/(temp)erature/$1/ig;
+    $forecast_text =~ s/(decr)easing/$1/ig;
+    $forecast_text =~ s/(incr)easing/$1/ig;
+    $forecast_text =~ s/(?:then )becoming/->/ig;
+    $forecast_text =~ s/, ->/ ->/ig;
+
+    # approximations
+    $forecast_text =~ s/ near//ig;
+    $forecast_text =~ s/ slight//ig;
+    $forecast_text =~ s/ around//ig;
+    $forecast_text =~ s/ possible//ig;
+    $forecast_text =~ s/ possibly//ig;
+    $forecast_text =~ s/ at times//ig;
+    $forecast_text =~ s/ with(?: an?)?//ig;
+    $forecast_text =~ s/as high as //ig;
+
+    # other words to remove
+    $forecast_text =~ s/ gradually//ig;
+    $forecast_text =~ s/ of the//ig;
+    $forecast_text =~ s/ mph//ig;
+
+    # small numbers
+    $forecast_text =~ s/(?: amounts|accumulation) of less than/ </ig;
+    $forecast_text =~ s/(?: amounts|accumulation) of more than/ >/ig;
+    $forecast_text =~ s/(?: a)? tenth(?:(?: of an)? inch)?/ .1"/ig;
+    $forecast_text =~ s/ three quarters(?:(?: of an)? inch)?/ .75"/ig;
+    $forecast_text =~ s/(?: a)? quarter(?:(?: of an)? inch)?/ .25"/ig;
+    $forecast_text =~ s/(?: a)? half(?:(?: of an)? inch)?/ .5"/ig;
+    $forecast_text =~ s/ one inch/ 1"/ig;
+    $forecast_text =~ s/(?: amounts)? between (.*?) and (.*?)\./ $1-$2\./ig;
+    $forecast_text =~ s/(\d+) to (\d+)/$1-$2/ig;
+    $forecast_text =~ s/ inches?\b/"/ig;
+
+    # spaces
+    $forecast_text =~ s/\s+$//;
+    $forecast_text =~ s/\s{2,}/ /g;
+    $forecast_text =~ s/< /</g;
+
+    # more cleaning
+    $forecast_text =~ s/Winds could gust/Gusts to/;
+    $forecast_text =~ s/Chance of precip is/Precip chance/;
+    $forecast_text =~ s/except higher amounts/higher/;
+    $forecast_text =~ s/in the/in/;
+    $forecast_text =~ s/ and /\//;
+
+    # uc day/time period
+    $forecast_text =~ s/^([^:]+):\s+(\w+)/uc($1) . ': ' . ucfirst($2)/e;
+
+    # only show interesting wind if there's a wind speed
+    if ( $forecast_text =~ /\.\s.+?\bwinds?\b.+?(\d+)\smph[^.]*\./ ) {
+        my $max_wind = $1;    # assume last number is the largest
+
+        # make sure the wind is above the min display; light wind is boring
+        if ( $max_wind < $k_min_display_wind ) {
+            $forecast_text =~ s/\..+?\bwinds?\b.+?\././;
+        }
+    }
+
+    # "light ... wind" is also boring
+    $forecast_text =~ s/\..+?\blight\b.+?winds?.*?\././i;
+
+    # fix two "'s from previous changes
+    if ( $forecast_text =~ /".+"/ ) {
+         $forecast_text =~ s/^(.*?)"/$1/;
+    }
+
+    return $forecast_text;
 }
 
 sub getInsideTemp    { my ($self) = @_; return $self->{inTemp}; }

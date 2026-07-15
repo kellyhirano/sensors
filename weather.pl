@@ -14,14 +14,21 @@ use strict;
 # --- Constants ---
 my $k_nws_forecast_url  = 'https://api.weather.gov/gridpoints/MTR/93,83/forecast';
 my $k_nws_alerts_url    = 'https://api.weather.gov/alerts/active?point=37.3228%2C-122.0566';
+my $k_nws_user_agent   = '(home sensors)';
 my $k_ncei_normals_base = 'https://www.ncei.noaa.gov/access/services/data/v1'
     . '?dataset=normals-daily&stations=USW00023293'
     . '&dataTypes=DLY-TMAX-NORMAL,DLY-TMIN-NORMAL&format=json';
 my $k_ncei_history_url  = 'https://www.ncei.noaa.gov/access/services/data/v1'
     . '?dataset=daily-summaries&stations=USW00023293'
     . '&startDate=1948-01-01&dataTypes=TMAX,TMIN&format=csv';
+# Long-history COOP station (San Jose, 1893-2007-09) so records reflect true
+# ~130-year extremes rather than just the airport station's 1998-present data.
+my $k_ncei_history_coop_url = 'https://www.ncei.noaa.gov/access/services/data/v1'
+    . '?dataset=daily-summaries&stations=USC00047821'
+    . '&startDate=1893-01-01&endDate=2007-12-31&dataTypes=TMAX,TMIN&format=csv';
 my $k_normals_cache     = '/home/pi/sensors/normals_cache.json';
 my $k_history_cache     = '/home/pi/sensors/ksjc_history.csv';
+my $k_history_coop_cache = '/home/pi/sensors/sjcoop_history.csv';
 my $k_weewx_db          = '/var/lib/weewx/weewx.sdb';
 
 # --- File lock ---
@@ -55,10 +62,10 @@ die "mqtt_host not found in sensor.conf [ALL] section\n" unless $mqtt_host;
 my $mqtt = Net::MQTT::Simple->new($mqtt_host);
 
 # --- Weather object ---
-# verify-forecast: use HTML scraping for comparison; otherwise skip it (use NWS API)
+# verify-forecast: build the sign forecast path too and compare its output with weather.pl NWS mapping.
 my $weather;
 if ($verify_forecast) {
-    print "Fetching HTML forecast for comparison...\n";
+    print "Fetching sign forecast for comparison...\n";
     $weather = new Weather;
 } else {
     $weather = new Weather({ exclude_forecast => 1 });
@@ -95,7 +102,6 @@ my $mqtt_json =
   . qq(});
 print STDERR "$mqtt_json\n" unless $silent_output;
 $mqtt->retain('weewx/sensor' => $mqtt_json);
-$mqtt->disconnect();
 
 # --- Heartbeat ---
 {
@@ -115,7 +121,10 @@ $mqtt->disconnect();
     system("wget -q -O /dev/null '$heartbeat_url' 2>/dev/null") if $heartbeat_url;
 }
 
-exit(0) if $exclude_forecast;
+if ($exclude_forecast) {
+    $mqtt->disconnect();
+    exit(0);
+}
 
 # --- Fetch NWS API forecast ---
 my $nws_data = fetch_url_json($k_nws_forecast_url);
@@ -124,7 +133,7 @@ my $nws_periods = $nws_data->{properties}{periods};
 
 my @forecasts = build_forecast_from_nws($nws_periods);
 
-# --- Verify mode: compare NWS with HTML scraping, then exit ---
+# --- Verify mode: compare weather.pl NWS mapping with sign Weather.pm mapping, then exit ---
 if ($verify_forecast) {
     compare_forecasts(\@forecasts, $weather);
     exit(0);
@@ -134,7 +143,6 @@ if ($verify_forecast) {
 $mqtt_json = to_json(\@forecasts);
 print STDERR "FORECAST: $mqtt_json\n" unless $silent_output;
 $mqtt->retain('weathergov/forecast' => $mqtt_json);
-$mqtt->disconnect();
 
 # --- NWS Alerts/Warnings ---
 my $nws_alerts = eval { fetch_url_json($k_nws_alerts_url) };
@@ -143,7 +151,6 @@ my @warnings = ($nws_alerts && $nws_alerts->{features})
 $mqtt_json = to_json(\@warnings);
 print STDERR "WARNINGS: $mqtt_json\n" unless $silent_output;
 $mqtt->retain('weathergov/warnings' => $mqtt_json);
-$mqtt->disconnect();
 
 # --- Temptrend ---
 my $temptrend = build_temptrend($nws_periods);
@@ -156,8 +163,14 @@ $mqtt->disconnect();
 
 sub fetch_url_json {
     my ($url) = @_;
-    my $json_str = `curl -m 45 -s -H 'Accept: application/geo+json,application/json' "$url"`;
-    return eval { decode_json($json_str) };
+    my $json_str = `curl -m 45 -fsS -H 'User-Agent: $k_nws_user_agent' -H 'Accept: application/geo+json,application/json' "$url"`;
+    if ( $? != 0 ) {
+        warn "fetch failed for $url\n";
+        return undef;
+    }
+    my $data = eval { decode_json($json_str) };
+    warn "decode failed for $url: $@\n" if $@;
+    return $data;
 }
 
 sub abbrev_forecast {
@@ -240,9 +253,11 @@ sub build_warnings_from_nws {
     my @warnings;
     for my $feature (@{$nws_alerts->{features} // []}) {
         my $props = $feature->{properties} // {};
-        my $event   = uc($props->{event} // '');
-        my $expires = $props->{expires}  // '';
-        my $desc    = 'thru ' . format_alert_time($expires);
+        my $event = uc($props->{event} // '');
+        next unless $event;
+        my $end_time = $props->{ends} || $props->{expires} || '';
+        my $end_desc = format_alert_time($end_time);
+        my $desc = $end_desc ? 'thru ' . $end_desc : '';
         push @warnings, { title => $event, desc => $desc };
     }
     return @warnings;
@@ -344,9 +359,11 @@ sub fetch_normals {
 }
 
 sub load_ghcnd_cache {
-    my ($file) = @_;
-    my %records;
-    open(my $fh, '<', $file) or return \%records;
+    my ($file, $records) = @_;
+    # Accumulate into a shared hashref so multiple station files can be merged
+    # (min TMIN / max TMAX per mm-dd across all stations).
+    $records //= {};
+    open(my $fh, '<', $file) or return $records;
 
     my $header = <$fh>;
     chomp $header;
@@ -354,7 +371,7 @@ sub load_ghcnd_cache {
     s/^\s*"?\s*|\s*"?\s*$//g for @cols;   # strip quotes/whitespace from header names
     my %col_idx = map { $cols[$_] => $_ } 0 .. $#cols;
 
-    return \%records unless exists $col_idx{DATE};
+    return $records unless exists $col_idx{DATE};
     my ($di, $xi, $ni) = @col_idx{qw(DATE TMAX TMIN)};
 
     while (my $line = <$fh>) {
@@ -369,21 +386,21 @@ sub load_ghcnd_cache {
         # GHCND TMAX/TMIN are in tenths of °C; convert to °F
         if (defined $xi && defined $f[$xi] && $f[$xi] =~ /^-?\d+$/) {
             my $tmax_f = $f[$xi] / 10 * 9/5 + 32;
-            if (!exists $records{$mm_dd}{record_high} || $tmax_f > $records{$mm_dd}{record_high}) {
-                $records{$mm_dd}{record_high}      = sprintf("%.1f", $tmax_f) + 0;
-                $records{$mm_dd}{record_high_year} = int($year);
+            if (!exists $records->{$mm_dd}{record_high} || $tmax_f > $records->{$mm_dd}{record_high}) {
+                $records->{$mm_dd}{record_high}      = sprintf("%.1f", $tmax_f) + 0;
+                $records->{$mm_dd}{record_high_year} = int($year);
             }
         }
         if (defined $ni && defined $f[$ni] && $f[$ni] =~ /^-?\d+$/) {
             my $tmin_f = $f[$ni] / 10 * 9/5 + 32;
-            if (!exists $records{$mm_dd}{record_low} || $tmin_f < $records{$mm_dd}{record_low}) {
-                $records{$mm_dd}{record_low}      = sprintf("%.1f", $tmin_f) + 0;
-                $records{$mm_dd}{record_low_year} = int($year);
+            if (!exists $records->{$mm_dd}{record_low} || $tmin_f < $records->{$mm_dd}{record_low}) {
+                $records->{$mm_dd}{record_low}      = sprintf("%.1f", $tmin_f) + 0;
+                $records->{$mm_dd}{record_low_year} = int($year);
             }
         }
     }
     close($fh);
-    return \%records;
+    return $records;
 }
 
 sub fetch_ghcnd_records {
@@ -396,15 +413,30 @@ sub fetch_ghcnd_records {
     if ($needs_refresh) {
         my $today = strftime('%Y-%m-%d', localtime(time));
         my $url   = "${k_ncei_history_url}&endDate=${today}";
-        print STDERR "Downloading GHCND history cache (may take ~30s)...\n";
+        print STDERR "Downloading GHCND airport history cache (may take ~30s)...\n";
         my $result = system(qq(curl -m 120 -s -o '$k_history_cache' '$url'));
         unless ($result == 0 && -f $k_history_cache && -s $k_history_cache > 10000) {
-            warn "Failed to download GHCND history\n";
+            warn "Failed to download GHCND airport history\n";
             # Fall back to old cache if it exists
         }
     }
 
-    return -f $k_history_cache ? load_ghcnd_cache($k_history_cache) : {};
+    # Long-history COOP station ended in 2007, so its data is static: fetch it
+    # once and keep it forever (no periodic refresh needed).
+    if (!-f $k_history_coop_cache || (-s $k_history_coop_cache // 0) < 10000) {
+        print STDERR "Downloading GHCND COOP history cache (one-time, ~2MB)...\n";
+        my $result = system(qq(curl -m 180 -s -o '$k_history_coop_cache' '$k_ncei_history_coop_url'));
+        unless ($result == 0 && -f $k_history_coop_cache && -s $k_history_coop_cache > 10000) {
+            warn "Failed to download GHCND COOP history\n";
+        }
+    }
+
+    # Merge records across both stations (min TMIN / max TMAX per mm-dd). Load
+    # the older COOP file first so ties keep the earlier year.
+    my $records = {};
+    load_ghcnd_cache($k_history_coop_cache, $records) if -f $k_history_coop_cache;
+    load_ghcnd_cache($k_history_cache, $records)      if -f $k_history_cache;
+    return $records;
 }
 
 sub build_temptrend {
