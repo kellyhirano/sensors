@@ -24,8 +24,8 @@ my $database = '/home/pi/sensors/sensors.db';
 my $userid   = '';
 my $password = '';
 my $dbs      = "DBI:$driver:dbname=$database";
-my $dbh      = DBI->connect( $dbs, $userid, $password, { RaiseError => 1 } )
-  or die $DBI::errstr;
+my $dbh = eval { DBI->connect( $dbs, $userid, $password, { RaiseError => 1 } ) };
+warn "PurpleAir: DB connect failed: $@" if $@;
 
 sub new {
     my $class = shift;
@@ -41,25 +41,29 @@ sub new {
 sub getAQI {
     my ($self) = @_;
 
+    return $self->{'aqi'} // 0 unless defined $dbh;
+
     my $statement = qq!select
                      aqi
                      from purple_air
                      where id = 'v1'
                      order by datetime desc
                      limit 1!;
-    my $sth = $dbh->prepare($statement);
-    my $rv = $sth->execute() or die $DBI::errstr;
-    print $DBI::errstr if ( $rv < 0 );
+    eval {
+        my $sth = $dbh->prepare($statement);
+        $sth->execute();
+        $self->{'aqi'} = ($sth->fetchrow_array())[0] // 0;
+        $sth->finish();
+    };
+    warn "PurpleAir: getAQI failed: $@" if $@;
 
-    $self->{'aqi'} = ($sth->fetchrow_array())[0];
-
-    $sth->finish();
-
-    return $self->{'aqi'};
+    return $self->{'aqi'} // 0;
 }
 
 sub getLastHourAQI {
     my ($self) = @_;
+
+    return 0 unless defined $dbh;
 
     my $statement = qq!select
                      aqi
@@ -69,15 +73,16 @@ sub getLastHourAQI {
                        - strftime('%s', datetime) > ( 60*60 )
                      order by datetime desc
                      limit 1!;
-    my $sth = $dbh->prepare($statement);
-    my $rv = $sth->execute() or die $DBI::errstr;
-    print $DBI::errstr if ( $rv < 0 );
+    eval {
+        my $sth = $dbh->prepare($statement);
+        $sth->execute();
+        my $last_aqi = ($sth->fetchrow_array())[0] // 0;
+        $self->{'last_hour_aqi'} = ($self->{'aqi'} // 0) - $last_aqi;
+        $sth->finish();
+    };
+    warn "PurpleAir: getLastHourAQI failed: $@" if $@;
 
-    $self->{'last_hour_aqi'} = $self->{'aqi'} - ($sth->fetchrow_array())[0];
-
-    $sth->finish();
-
-    return $self->{'last_hour_aqi'};
+    return $self->{'last_hour_aqi'} // 0;
 }
 
 sub getAQIDesc {

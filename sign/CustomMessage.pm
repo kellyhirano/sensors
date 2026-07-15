@@ -11,8 +11,8 @@ my $database = '/home/pi/sign/sign.db';
 my $userid   = '';
 my $password = '';
 my $dbs      = "DBI:$driver:dbname=$database";
-my $dbh      = DBI->connect( $dbs, $userid, $password, { RaiseError => 1 } )
-  or die $DBI::errstr;
+my $dbh = eval { DBI->connect( $dbs, $userid, $password, { RaiseError => 1 } ) };
+warn "CustomMessage: DB connect failed: $@" if $@;
 
 sub new {
     my $class = shift;
@@ -24,22 +24,25 @@ sub new {
 sub getMessages {
     my ($self) = @_;
 
+    return () unless defined $dbh;
+
     my @messages = ();
+    eval {
+        my $statement = qq!select
+                         message
+                         from custom_message
+                         where datetime('now', 'localtime') > start_datetime
+                         and datetime('now', 'localtime') < end_datetime!;
+        my $sth = $dbh->prepare($statement);
+        $sth->execute();
 
-    my $statement = qq!select
-                     message
-                     from custom_message
-                     where datetime('now', 'localtime') > start_datetime
-                     and datetime('now', 'localtime') < end_datetime!;
-    my $sth = $dbh->prepare($statement);
-    my $rv = $sth->execute() or die $DBI::errstr;
-    print $DBI::errstr if ( $rv < 0 );
+        while ( my @row = $sth->fetchrow_array() ) {
+            push( @messages, $row[0] );
+        }
 
-    while ( my @row = $sth->fetchrow_array() ) {
-        push( @messages, $row[0] );
-    }
-
-    $sth->finish();
+        $sth->finish();
+    };
+    warn "CustomMessage: getMessages failed: $@" if $@;
 
     return @messages;
 }

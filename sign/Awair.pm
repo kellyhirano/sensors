@@ -12,8 +12,8 @@ my $database = '/home/pi/sensors/sensors.db';
 my $userid   = '';
 my $password = '';
 my $dbs      = "DBI:$driver:dbname=$database";
-my $dbh      = DBI->connect( $dbs, $userid, $password, { RaiseError => 1 } )
-  or die $DBI::errstr;
+my $dbh = eval { DBI->connect( $dbs, $userid, $password, { RaiseError => 1 } ) };
+warn "Awair: DB connect failed: $@" if $@;
 
 sub new {
     my $class = shift;
@@ -27,16 +27,20 @@ sub new {
 sub executeQuery {
     my ( $self, $statement, $param ) = @_;
 
-    my $sth = $dbh->prepare($statement);
-    my $rv = 0;
-    if ( defined ($param) ) {
-      $rv = $sth->execute($param) or die $DBI::errstr;
-    } else {
-      $rv = $sth->execute() or die $DBI::errstr;
-    }
-    print $DBI::errstr if ( $rv < 0 );
-    my @row = $sth->fetchrow_array();
-    $sth->finish();
+    return () unless defined $dbh;
+
+    my @row;
+    eval {
+        my $sth = $dbh->prepare($statement);
+        if ( defined ($param) ) {
+            $sth->execute($param);
+        } else {
+            $sth->execute();
+        }
+        @row = $sth->fetchrow_array();
+        $sth->finish();
+    };
+    warn "Awair: query failed: $@" if $@;
 
     return @row;
 }
@@ -44,16 +48,20 @@ sub executeQuery {
 sub executeMultipleRowQuery {
     my ( $self, $statement, $param ) = @_;
 
-    my $sth = $dbh->prepare($statement);
-    my $rv = 0;
-    if ( defined ($param) ) {
-      $rv = $sth->execute($param) or die $DBI::errstr;
-    } else {
-      $rv = $sth->execute() or die $DBI::errstr;
-    }
-    print $DBI::errstr if ( $rv < 0 );
-    my $ar_rows = $sth->fetchall_arrayref();
-    $sth->finish();
+    return undef unless defined $dbh;
+
+    my $ar_rows;
+    eval {
+        my $sth = $dbh->prepare($statement);
+        if ( defined ($param) ) {
+            $sth->execute($param);
+        } else {
+            $sth->execute();
+        }
+        $ar_rows = $sth->fetchall_arrayref();
+        $sth->finish();
+    };
+    warn "Awair: query failed: $@" if $@;
 
     return $ar_rows;
 }

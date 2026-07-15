@@ -22,6 +22,7 @@ my $custommessage = new CustomMessage;
 
 my $prev_bitmap     = '';
 my $screen_is_blank = 0;
+my $heartbeat_url   = $ENV{SIGN_HEARTBEAT_URL} || '';
 
 my $k_min_forecast_length = 40;
 
@@ -129,6 +130,10 @@ while (1) {
             print STDERR scalar(localtime) . ": setting to black\n";
         }
         $screen_is_blank = 1;
+    }
+
+    if ($heartbeat_url) {
+        system('curl', '-fsS', $heartbeat_url);
     }
 
     sleep(300);

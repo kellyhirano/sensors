@@ -11,8 +11,8 @@ my $database = '/home/pi/sensors/sensors.db';
 my $userid   = '';
 my $password = '';
 my $dbs      = "DBI:$driver:dbname=$database";
-my $dbh      = DBI->connect( $dbs, $userid, $password, { RaiseError => 1 } )
-  or die $DBI::errstr;
+my $dbh = eval { DBI->connect( $dbs, $userid, $password, { RaiseError => 1 } ) };
+warn "Rainforest: DB connect failed: $@" if $@;
 
 sub new {
     my $class = shift;
@@ -24,14 +24,17 @@ sub new {
 sub get5minPowerLoad {
     my ($self) = @_;
 
-    my $statement = qq!select avg(load) from rainforest where datetime > datetime('now','-5 minutes')!;
-    my $sth = $dbh->prepare($statement);
-    my $rv = $sth->execute() or die $DBI::errstr;
-    print $DBI::errstr if ( $rv < 0 );
+    return undef unless defined $dbh;
 
-    my $powerLoad = ($sth->fetchrow_array())[0];
-
-    $sth->finish();
+    my $powerLoad;
+    eval {
+        my $statement = qq!select avg(load) from rainforest where datetime > datetime('now','-5 minutes')!;
+        my $sth = $dbh->prepare($statement);
+        $sth->execute();
+        $powerLoad = ($sth->fetchrow_array())[0];
+        $sth->finish();
+    };
+    warn "Rainforest: get5minPowerLoad failed: $@" if $@;
 
     return $powerLoad;
 }
