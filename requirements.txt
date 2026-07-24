@@ -1,4 +1,5 @@
 paho-mqtt
 python-aqi
-requests
+# Require the security fixes for CVE-2024-47081 and CVE-2026-25645.
+requests>=2.33.0,<3
 beautifulsoup4
