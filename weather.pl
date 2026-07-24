@@ -9,6 +9,7 @@ use Net::MQTT::Simple;
 use Getopt::Long;
 use DBI;
 use POSIX qw(strftime mktime);
+use Text::ParseWords qw(parse_line);
 use strict;
 
 # --- Constants ---
@@ -20,12 +21,12 @@ my $k_ncei_normals_base = 'https://www.ncei.noaa.gov/access/services/data/v1'
     . '&dataTypes=DLY-TMAX-NORMAL,DLY-TMIN-NORMAL&format=json';
 my $k_ncei_history_url  = 'https://www.ncei.noaa.gov/access/services/data/v1'
     . '?dataset=daily-summaries&stations=USW00023293'
-    . '&startDate=1948-01-01&dataTypes=TMAX,TMIN&format=csv';
+    . '&startDate=1948-01-01&dataTypes=TMAX,TMIN&includeAttributes=true&format=csv';
 # Long-history COOP station (San Jose, 1893-2007-09) so records reflect true
 # ~130-year extremes rather than just the airport station's 1998-present data.
 my $k_ncei_history_coop_url = 'https://www.ncei.noaa.gov/access/services/data/v1'
     . '?dataset=daily-summaries&stations=USC00047821'
-    . '&startDate=1893-01-01&endDate=2007-12-31&dataTypes=TMAX,TMIN&format=csv';
+    . '&startDate=1893-01-01&endDate=2007-12-31&dataTypes=TMAX,TMIN&includeAttributes=true&format=csv';
 my $k_normals_cache     = '/home/pi/sensors/normals_cache.json';
 my $k_history_cache     = '/home/pi/sensors/ksjc_history.csv';
 my $k_history_coop_cache = '/home/pi/sensors/sjcoop_history.csv';
@@ -367,31 +368,31 @@ sub load_ghcnd_cache {
 
     my $header = <$fh>;
     chomp $header;
-    my @cols = split(/,/, $header);
-    s/^\s*"?\s*|\s*"?\s*$//g for @cols;   # strip quotes/whitespace from header names
+    my @cols = ghcnd_csv_fields($header);
     my %col_idx = map { $cols[$_] => $_ } 0 .. $#cols;
 
     return $records unless exists $col_idx{DATE};
     my ($di, $xi, $ni) = @col_idx{qw(DATE TMAX TMIN)};
+    my ($xai, $nai) = @col_idx{qw(TMAX_ATTRIBUTES TMIN_ATTRIBUTES)};
 
     while (my $line = <$fh>) {
         chomp $line;
-        my @f = split(/,/, $line);
-        # Strip surrounding double-quotes and whitespace from each field
-        s/^\s*"?\s*|\s*"?\s*$//g for @f;
+        my @f = ghcnd_csv_fields($line);
         my $date = (defined $di && defined $f[$di]) ? $f[$di] : '';
         next unless $date =~ /^(\d{4})-(\d{2}-\d{2})$/;
         my ($year, $mm_dd) = ($1, $2);
 
         # GHCND TMAX/TMIN are in tenths of °C; convert to °F
-        if (defined $xi && defined $f[$xi] && $f[$xi] =~ /^-?\d+$/) {
+        if (defined $xi && defined $f[$xi] && $f[$xi] =~ /^-?\d+$/
+            && !ghcnd_has_quality_flag(defined $xai ? $f[$xai] : undef)) {
             my $tmax_f = $f[$xi] / 10 * 9/5 + 32;
             if (!exists $records->{$mm_dd}{record_high} || $tmax_f > $records->{$mm_dd}{record_high}) {
                 $records->{$mm_dd}{record_high}      = sprintf("%.1f", $tmax_f) + 0;
                 $records->{$mm_dd}{record_high_year} = int($year);
             }
         }
-        if (defined $ni && defined $f[$ni] && $f[$ni] =~ /^-?\d+$/) {
+        if (defined $ni && defined $f[$ni] && $f[$ni] =~ /^-?\d+$/
+            && !ghcnd_has_quality_flag(defined $nai ? $f[$nai] : undef)) {
             my $tmin_f = $f[$ni] / 10 * 9/5 + 32;
             if (!exists $records->{$mm_dd}{record_low} || $tmin_f < $records->{$mm_dd}{record_low}) {
                 $records->{$mm_dd}{record_low}      = sprintf("%.1f", $tmin_f) + 0;
@@ -403,11 +404,37 @@ sub load_ghcnd_cache {
     return $records;
 }
 
+sub ghcnd_csv_fields {
+    my ($line) = @_;
+    my @fields = map { defined $_ ? $_ : '' } parse_line(',', 0, $line // '');
+    s/^\s+|\s+$//g for @fields;
+    return @fields;
+}
+
+sub ghcnd_cache_has_quality_attrs {
+    my ($file) = @_;
+    return 0 unless -f $file && open(my $fh, '<', $file);
+    my $header = <$fh> // '';
+    close($fh);
+    my %cols = map { $_ => 1 } ghcnd_csv_fields($header);
+    return $cols{TMAX_ATTRIBUTES} || $cols{TMIN_ATTRIBUTES};
+}
+
+sub ghcnd_has_quality_flag {
+    my ($attrs) = @_;
+    return 0 unless defined $attrs && length $attrs;
+    my @parts = split(/,/, $attrs, -1);
+    my $qflag = $parts[1] // '';
+    $qflag =~ s/^\s+|\s+$//g;
+    return $qflag ne '';
+}
+
 sub fetch_ghcnd_records {
     my $needs_refresh = 1;
     if (-f $k_history_cache) {
         my $mtime = (stat($k_history_cache))[9];
         $needs_refresh = 0 if (time - $mtime) < 30 * 86400;
+        $needs_refresh = 1 unless ghcnd_cache_has_quality_attrs($k_history_cache);
     }
 
     if ($needs_refresh) {
@@ -423,7 +450,8 @@ sub fetch_ghcnd_records {
 
     # Long-history COOP station ended in 2007, so its data is static: fetch it
     # once and keep it forever (no periodic refresh needed).
-    if (!-f $k_history_coop_cache || (-s $k_history_coop_cache // 0) < 10000) {
+    if (!-f $k_history_coop_cache || (-s $k_history_coop_cache // 0) < 10000
+        || !ghcnd_cache_has_quality_attrs($k_history_coop_cache)) {
         print STDERR "Downloading GHCND COOP history cache (one-time, ~2MB)...\n";
         my $result = system(qq(curl -m 180 -s -o '$k_history_coop_cache' '$k_ncei_history_coop_url'));
         unless ($result == 0 && -f $k_history_coop_cache && -s $k_history_coop_cache > 10000) {

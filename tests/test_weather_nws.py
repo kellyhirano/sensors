@@ -8,6 +8,7 @@ These tests validate:
 - draw_temp_chart() with synthetic data (no hardware)
 """
 
+import csv
 import io
 import sys
 import os
@@ -46,41 +47,51 @@ def parse_ghcnd_csv(csv_content):
     """Python mirror of Perl load_ghcnd_cache().
 
     Returns {mm_dd: {record_high, record_high_year, record_low, record_low_year}}
-    GHCND TMAX/TMIN are tenths of °C; convert to °F.
+    GHCND TMAX/TMIN are tenths of deg C; convert to deg F.
     """
     records = {}
-    reader = io.StringIO(csv_content)
-    header = reader.readline().strip().split(',')
+    rows = csv.reader(io.StringIO(csv_content))
+    header = next(rows)
     col = {c: i for i, c in enumerate(header)}
 
     di = col.get('DATE')
     xi = col.get('TMAX')
     ni = col.get('TMIN')
+    xai = col.get('TMAX_ATTRIBUTES')
+    nai = col.get('TMIN_ATTRIBUTES')
     if di is None:
         return records
 
-    for line in reader:
-        f = line.strip().split(',')
+    def has_quality_flag(attrs):
+        if not attrs:
+            return False
+        parts = attrs.split(',')
+        qflag = parts[1].strip() if len(parts) > 1 else ''
+        return qflag != ''
+
+    for f in rows:
         if len(f) <= di:
             continue
         date_str = f[di]
         if len(date_str) < 10:
             continue
-        year   = int(date_str[:4])
-        mm_dd  = date_str[5:10]
+        year = int(date_str[:4])
+        mm_dd = date_str[5:10]
 
-        if xi is not None and xi < len(f) and f[xi].lstrip('-').isdigit():
+        if (xi is not None and xi < len(f) and f[xi].strip().lstrip('-').isdigit()
+                and not has_quality_flag(f[xai] if xai is not None and xai < len(f) else None)):
             tmax_f = int(f[xi]) / 10 * 9 / 5 + 32
             entry = records.setdefault(mm_dd, {})
             if 'record_high' not in entry or tmax_f > entry['record_high']:
-                entry['record_high']      = round(tmax_f, 1)
+                entry['record_high'] = round(tmax_f, 1)
                 entry['record_high_year'] = year
 
-        if ni is not None and ni < len(f) and f[ni].lstrip('-').isdigit():
+        if (ni is not None and ni < len(f) and f[ni].strip().lstrip('-').isdigit()
+                and not has_quality_flag(f[nai] if nai is not None and nai < len(f) else None)):
             tmin_f = int(f[ni]) / 10 * 9 / 5 + 32
             entry = records.setdefault(mm_dd, {})
             if 'record_low' not in entry or tmin_f < entry['record_low']:
-                entry['record_low']      = round(tmin_f, 1)
+                entry['record_low'] = round(tmin_f, 1)
                 entry['record_low_year'] = year
 
     return records
@@ -133,6 +144,17 @@ class TestGhcndRecordParsing:
         assert '04-12' in records
         assert '04-13' in records
         assert records['04-12']['record_high'] != records['04-13']['record_high']
+
+    def test_quality_flagged_tmin_skipped(self):
+        csv_text = (
+            'STATION,DATE,TMAX,TMAX_ATTRIBUTES,TMIN,TMIN_ATTRIBUTES\n'
+            'USC00047821,1989-07-19,311,",,0",156,",,0"\n'
+            'USC00047821,1989-07-20,289,",,0",-150,",G,0"\n'
+            'USC00047821,1909-07-20,306,",,0",72,",,0"\n'
+        )
+        records = parse_ghcnd_csv(csv_text)
+        assert records['07-20']['record_low'] == round(72 / 10 * 9 / 5 + 32, 1)
+        assert records['07-20']['record_low_year'] == 1909
 
 
 # ---------------------------------------------------------------------------
